@@ -1,28 +1,20 @@
 """
-Fixed Streamlit Quiz Frontend
+Streamlit Quiz Frontend — with CSV download
 
-This version improves JSON loading to handle nested structures such as:
-- { "questions": [...] }
-- { "pageProps": { "questions": [...] } }
-- deeper nested structures where a "questions" key appears anywhere
+This file is the same single-file app but adds the ability to download quiz results as a CSV.
+It detects nested `pageProps.questions` structures and supports both modes (reveal at end / reveal on demand).
 
-Features:
-- Upload multiple JSON files or load from a local folder
-- Two modes: reveal-at-end and show-on-demand
-- Uses answers_community when present, falls back to answer_ET/answer
-- Handles multiple-correct-answer questions (multiselect)
-- Final summary shows only failed or ungradable questions and includes URL
-
-Run with: streamlit run streamlit_quiz_frontend_fixed.py
+Run with: streamlit run streamlit_quiz_frontend_with_csv.py
 """
 
 import streamlit as st
 import json
 import re
+import pandas as pd
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-st.set_page_config(page_title="Quiz Frontend (fixed)", layout="wide")
+st.set_page_config(page_title="Quiz Frontend (with CSV)", layout="wide")
 
 # ---------------- Helpers ----------------
 
@@ -161,8 +153,8 @@ if 'loaded' not in st.session_state:
     st.session_state.loaded = False
 
 # ---------------- UI ----------------
-st.title("Quiz Frontend (fixed)")
-st.write("Upload JSON files or load a local folder. This version will detect nested `pageProps.questions` structures.")
+st.title("Quiz Frontend (with CSV)")
+st.write("Upload JSON files or load a local folder. This version will detect nested `pageProps.questions` list and includes CSV download.")
 
 with st.expander("Load quizzes", expanded=True):
     col1, col2 = st.columns([2, 1])
@@ -255,16 +247,13 @@ if st.checkbox("Mark this question as 'skip' (will be treated as incorrect)", ke
 st.markdown("---")
 if st.button("Finish quiz and show summary"):
     failed = []
+    results = []
     for idx, question in enumerate(questions):
         resp = st.session_state.responses.get(idx, None)
         corr = get_correct_answers(question)
         ch = get_choices(question)
 
         gradeable = bool(corr) and bool(ch)
-
-        if not gradeable:
-            failed.append((idx, question, resp, corr))
-            continue
 
         if isinstance(resp, list):
             user_letters = [r.upper() for r in resp]
@@ -278,11 +267,23 @@ if st.button("Finish quiz and show summary"):
         else:
             is_correct = False
 
-        if not is_correct:
+        if not gradeable or not is_correct:
             failed.append((idx, question, user_letters, corr))
+
+        # prepare row for CSV export
+        results.append({
+            "index": idx + 1,
+            "question_id": question.get('question_id', ''),
+            "enunciate": question.get('question_text', ''),
+            "user_answer": ",".join(user_letters) if user_letters else "",
+            "correct_answer": ",".join(corr) if corr else "",
+            "is_correct": is_correct,
+            "url": question.get('url', '')
+        })
 
     st.header("Summary — Failed Questions")
     st.write(f"Total questions: {n_questions} — Failed / Ungradable: {len(failed)}")
+
     if not failed:
         st.success("All graded questions were answered correctly!")
     else:
@@ -297,8 +298,23 @@ if st.button("Finish quiz and show summary"):
                     st.write("**Choices:**")
                     for k in sorted(ch.keys()):
                         st.markdown(f"- **{k}**: {ch[k]}")
+
+    # prepare CSV for download
+    try:
+        df = pd.DataFrame(results)
+        csv_data = df.to_csv(index=False).encode('utf-8')
+
+        st.download_button(
+            label="Descargar resultados como CSV",
+            data=csv_data,
+            file_name="quiz_results.csv",
+            mime="text/csv",
+        )
+    except Exception as e:
+        st.error(f"Error al preparar el CSV: {e}")
+
     st.balloons()
 
 st.markdown("---")
-st.caption("Streamlit Quiz Frontend — fixed loader for nested JSON structures.")
+st.caption("Streamlit Quiz Frontend — with CSV download. Uses answers_community when available.")
 
