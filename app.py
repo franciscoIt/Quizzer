@@ -14,7 +14,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-st.set_page_config(page_title="Quiz Frontend (with CSV)", layout="wide")
+st.set_page_config(page_title="Quiz app", layout="wide")
 
 # ---------------- Helpers ----------------
 
@@ -153,8 +153,8 @@ if 'loaded' not in st.session_state:
     st.session_state.loaded = False
 
 # ---------------- UI ----------------
-st.title("Quiz Frontend (with CSV)")
-st.write("Upload JSON files or load a local folder. This version will detect nested `pageProps.questions` list and includes CSV download.")
+st.title("Quiz app")
+st.write("Upload JSON files or load a local folder. This version will detect nested `pageProps.questions` list, and enables CSV download.")
 
 with st.expander("Load quizzes", expanded=True):
     col1, col2 = st.columns([2, 1])
@@ -314,7 +314,4 @@ if st.button("Finish quiz and show summary"):
         st.error(f"Error al preparar el CSV: {e}")
 
     st.balloons()
-
-st.markdown("---")
-st.caption("Streamlit Quiz Frontend — with CSV download. Uses answers_community when available.")
 
