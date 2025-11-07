@@ -1,98 +1,14 @@
-"""
-Streamlit Quiz Frontend — with CSV download
-
-This file is the same single-file app but adds the ability to download quiz results as a CSV.
-It detects nested `pageProps.questions` structures and supports both modes (reveal at end / reveal on demand).
-
-Run with: streamlit run streamlit_quiz_frontend_with_csv.py
-"""
-
 import streamlit as st
-import json
 import re
 import pandas as pd
-from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Use loader manager (routes by extension / content sniffing) and returns normalized questions
+from src.loaders import load_from_files, load_from_folder
 
 st.set_page_config(page_title="Quiz app", layout="wide")
 
 # ---------------- Helpers ----------------
-
-def find_questions_in_obj(obj: Any) -> Optional[List[Dict[str, Any]]]:
-    """Recursively search for a list of question dicts in a JSON-like object.
-    Returns the first list found, or None."""
-    if isinstance(obj, dict):
-        # direct keys
-        if 'questions' in obj and isinstance(obj['questions'], list):
-            return obj['questions']
-        if 'pageProps' in obj and isinstance(obj['pageProps'], dict) and 'questions' in obj['pageProps']:
-            return obj['pageProps']['questions']
-        # search values
-        for v in obj.values():
-            res = find_questions_in_obj(v)
-            if res:
-                return res
-    elif isinstance(obj, list):
-        # heuristics: if list of dicts that look like questions
-        if len(obj) > 0 and isinstance(obj[0], dict) and ('question_text' in obj[0] or 'choices' in obj[0]):
-            return obj
-        for item in obj:
-            res = find_questions_in_obj(item)
-            if res:
-                return res
-    return None
-
-
-def parse_uploaded_jsons(files) -> List[Dict[str, Any]]:
-    questions: List[Dict[str, Any]] = []
-    for uploaded in files:
-        try:
-            raw = uploaded.read()
-            # uploaded can be binary; try decode
-            if isinstance(raw, bytes):
-                content = raw.decode('utf-8')
-            else:
-                content = str(raw)
-            data = json.loads(content)
-        except Exception as e:
-            st.error(f"Could not read {getattr(uploaded,'name', 'uploaded file')}: {e}")
-            continue
-
-        found = find_questions_in_obj(data)
-        if found:
-            questions.extend(found)
-        elif isinstance(data, list):
-            questions.extend(data)
-        elif isinstance(data, dict):
-            # maybe it's a single question dict
-            questions.append(data)
-        else:
-            st.warning(f"Uploaded file {getattr(uploaded,'name', 'file')} had unexpected structure and was skipped.")
-    return questions
-
-
-def load_from_local_folder(folder_path: str) -> List[Dict[str, Any]]:
-    p = Path(folder_path)
-    questions: List[Dict[str, Any]] = []
-    if not p.exists() or not p.is_dir():
-        st.error("Provided folder path does not exist or is not a folder.")
-        return questions
-
-    for f in p.glob('**/*.json'):
-        try:
-            text = f.read_text(encoding='utf-8')
-            data = json.loads(text)
-        except Exception as e:
-            st.warning(f"Could not read {f.name}: {e}")
-            continue
-        found = find_questions_in_obj(data)
-        if found:
-            questions.extend(found)
-        elif isinstance(data, list):
-            questions.extend(data)
-        elif isinstance(data, dict):
-            questions.append(data)
-    return questions
 
 
 def extract_letters_from_string(s: str) -> List[str]:
@@ -100,14 +16,19 @@ def extract_letters_from_string(s: str) -> List[str]:
 
 
 def get_correct_answers(q: Dict[str, Any]) -> List[str]:
+    """
+    Return list of unique uppercase answer letters for question q.
+    The manager already normalizes many shapes, but keep fallbacks here.
+    """
     candidates: List[str] = []
     ac = q.get('answers_community') or q.get('answers_community', None)
     if ac and isinstance(ac, list) and len(ac) > 0:
         for item in ac:
             if isinstance(item, str):
                 candidates.extend(extract_letters_from_string(item))
+
     if not candidates:
-        for key in ('answer_ET', 'answer'):
+        for key in ('answer_ET', 'answer', 'correct_answer'):
             val = q.get(key)
             if val:
                 if isinstance(val, list):
@@ -115,15 +36,23 @@ def get_correct_answers(q: Dict[str, Any]) -> List[str]:
                         candidates.extend(extract_letters_from_string(str(v)))
                 else:
                     candidates.extend(extract_letters_from_string(str(val)))
+
+    # Normalize and deduplicate preserving order
     candidates = [c.upper() for c in candidates]
-    seen = set(); out = []
+    seen = set()
+    out = []
     for c in candidates:
         if c not in seen:
-            seen.add(c); out.append(c)
+            seen.add(c)
+            out.append(c)
     return out
 
 
 def get_choices(q: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """
+    Expect q['choices'] to be a dict like {"A": "text", "B": "text", ...}.
+    Return a normalized version with single-letter uppercase keys, or None.
+    """
     ch = q.get('choices')
     if isinstance(ch, dict) and ch:
         normalized = {}
@@ -154,47 +83,77 @@ if 'loaded' not in st.session_state:
 
 # ---------------- UI ----------------
 st.title("Quiz app")
-st.write("Upload JSON files or load a local folder. This version will detect nested `pageProps.questions` list, and enables CSV download.")
+st.write(
+    "Upload JSON or CSV quiz files or load a local folder. "
+    "The loader manager will route and normalize files automatically."
+)
 
 with st.expander("Load quizzes", expanded=True):
     col1, col2 = st.columns([2, 1])
     with col1:
-        uploaded = st.file_uploader("Upload JSON quiz files", type=['json'], accept_multiple_files=True)
+        uploaded = st.file_uploader(
+            "Upload quiz files (JSON or CSV)",
+            type=['json', 'csv'],
+            accept_multiple_files=True
+        )
+
         if st.button("Load uploaded files"):
             if not uploaded:
                 st.warning("No files selected.")
             else:
-                st.session_state.questions = parse_uploaded_jsons(uploaded)
-                st.session_state.loaded = True
-                st.session_state.responses = {}
-                st.session_state.current_idx = 0
-                st.success(f"Loaded {len(st.session_state.questions)} questions from uploaded files.")
+                try:
+                    # manager returns normalized question dicts
+                    questions = load_from_files(uploaded)
+                except Exception as e:
+                    st.error(f"Error while loading files: {e}")
+                    questions = []
+
+                if not questions:
+                    st.error("No valid questions found in the uploaded files.")
+                else:
+                    st.session_state.questions = questions
+                    st.session_state.loaded = True
+                    st.session_state.responses = {}
+                    st.session_state.current_idx = 0
+                    st.success(f"Loaded {len(questions)} questions from uploaded files.")
+
     with col2:
         folder = st.text_input("Local folder path (optional)", value="")
         if st.button("Load from local folder"):
             if not folder:
-                st.warning("Provide a folder path where JSON files are located.")
+                st.warning("Provide a folder path where JSON/CSV files are located.")
             else:
-                qs = load_from_local_folder(folder)
-                if qs:
-                    st.session_state.questions = qs
+                try:
+                    questions = load_from_folder(folder)
+                except Exception as e:
+                    st.error(f"Error while loading folder: {e}")
+                    questions = []
+
+                if not questions:
+                    st.error("No valid questions found in that folder.")
+                else:
+                    st.session_state.questions = questions
                     st.session_state.loaded = True
                     st.session_state.responses = {}
                     st.session_state.current_idx = 0
-                    st.success(f"Loaded {len(qs)} questions from {folder}.")
+                    st.success(f"Loaded {len(questions)} questions from {folder}.")
 
-mode = st.radio("Choose mode:", options=["Reveal correct answers at the end", "Show correct answer on demand (per question)"], index=0)
+mode = st.radio(
+    "Choose mode:",
+    options=["Reveal correct answers at the end", "Show correct answer on demand (per question)"],
+    index=0
+)
 st.session_state.mode = 'reveal_at_end' if mode.startswith('Reveal') else 'show_on_demand'
 
 if not st.session_state.loaded or not st.session_state.questions:
-    st.info("No questions loaded yet. Upload JSON files or load from a local folder to begin.")
+    st.info("No questions loaded yet. Upload JSON/CSV files or load from a local folder to begin.")
     st.stop()
 
 questions = st.session_state.questions
 n_questions = len(questions)
 
 # navigation
-col_prev, col_next = st.columns([1,1])
+col_prev, col_next = st.columns([1, 1])
 with col_prev:
     if st.button("Previous") and st.session_state.current_idx > 0:
         st.session_state.current_idx -= 1
@@ -216,8 +175,11 @@ url = q.get('url', '')
 resp_key = f"resp_{st.session_state.current_idx}"
 
 if choices:
-    labels = [choice_label(k, choices[k]) for k in sorted(choices.keys())]
-    label_to_letter = {choice_label(k, choices[k]): k for k in choices}
+    sorted_keys = sorted(choices.keys())
+    labels = [choice_label(k, choices[k]) for k in sorted_keys]
+    # mapping from displayed label to letter
+    label_to_letter = {labels[i]: sorted_keys[i] for i in range(len(labels))}
+
     if len(correct) > 1:
         sel = st.multiselect("Select one or more answers:", options=labels, key=resp_key)
         selected_letters = [label_to_letter[s] for s in sel]
@@ -271,7 +233,9 @@ if st.button("Finish quiz and show summary"):
             failed.append((idx, question, user_letters, corr))
 
         # prepare row for CSV export
-        results.append({
+        ch = get_choices(question) or {}
+
+        row = {
             "index": idx + 1,
             "question_id": question.get('question_id', ''),
             "enunciate": question.get('question_text', ''),
@@ -279,7 +243,13 @@ if st.button("Finish quiz and show summary"):
             "correct_answer": ",".join(corr) if corr else "",
             "is_correct": is_correct,
             "url": question.get('url', '')
-        })
+        }
+
+        # Add up to 4 choices (A–D)
+        for letter in ["A", "B", "C", "D"]:
+            row[f"choice_{letter}"] = ch.get(letter, "")
+
+        results.append(row)
 
     st.header("Summary — Failed Questions")
     st.write(f"Total questions: {n_questions} — Failed / Ungradable: {len(failed)}")
@@ -312,6 +282,3 @@ if st.button("Finish quiz and show summary"):
         )
     except Exception as e:
         st.error(f"Error al preparar el CSV: {e}")
-
-    st.balloons()
-
